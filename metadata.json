@@ -1,0 +1,6 @@
+{
+  "name": "SALAM Quran - SDIT Salsabila 3 Banguntapan",
+  "description": "Sistem Informasi & Input Laporan Hasil Hafalan Siswa SDIT Salsabila 3 Banguntapan (Salsabila Achievement, Learning, And Application for Monitoring Qur’an)",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
