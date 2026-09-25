@@ -5,11 +5,13 @@
  * Supports:
  * - Online connection to Supabase project
  * - Realtime publication (supabase_realtime) for live updates
+ * - Live subscription via postgres_changes on records, students, teachers, and users
  * - Full DDL Schema + RLS
  * - Complete SQL seed for all 18 teachers, 19 classes of students, and user accounts
+ * - Bidirectional synchronization between local cache and Supabase PostgreSQL
  */
 
-import { createClient, SupabaseClient } from '@supabase/supabase-js';
+import { createClient, SupabaseClient, RealtimeChannel } from '@supabase/supabase-js';
 import { Teacher, Student, UserAccount, HafalanRecord } from '../types';
 import { INITIAL_TEACHERS, INITIAL_STUDENTS } from '../data/initialData';
 
@@ -18,6 +20,8 @@ export interface SupabaseConfig {
   anonKey: string;
   isConnected: boolean;
 }
+
+export type RealtimeConnectionStatus = 'CONNECTED' | 'CONNECTING' | 'DISCONNECTED' | 'ERROR';
 
 const STORAGE_KEY_SUPABASE = 'salam_quran_supabase_config';
 
@@ -48,15 +52,29 @@ export function getSupabaseConfig(): SupabaseConfig {
   };
 }
 
+let _cachedClient: SupabaseClient | null = null;
+let _activeRealtimeChannel: RealtimeChannel | null = null;
+let _realtimeStatus: RealtimeConnectionStatus = 'DISCONNECTED';
+
+export function getRealtimeStatus(): RealtimeConnectionStatus {
+  return _realtimeStatus;
+}
+
+function setRealtimeStatus(status: RealtimeConnectionStatus) {
+  _realtimeStatus = status;
+  window.dispatchEvent(new CustomEvent('salam_realtime_status_changed', { detail: { status } }));
+}
+
 export function saveSupabaseConfig(config: { url: string; anonKey: string }): void {
   const url = config.url.trim();
   const anonKey = config.anonKey.trim();
   localStorage.setItem(STORAGE_KEY_SUPABASE, JSON.stringify({ url, anonKey }));
-  _cachedClient = null; // reset client
+  
+  // Reset client and active channel
+  stopRealtimeSubscription();
+  _cachedClient = null;
   window.dispatchEvent(new Event('salam_supabase_config_changed'));
 }
-
-let _cachedClient: SupabaseClient | null = null;
 
 export function getSupabaseClient(): SupabaseClient | null {
   if (_cachedClient) return _cachedClient;
@@ -69,7 +87,12 @@ export function getSupabaseClient(): SupabaseClient | null {
       auth: {
         persistSession: false,
         autoRefreshToken: false,
-      }
+      },
+      realtime: {
+        params: {
+          eventsPerSecond: 20,
+        },
+      },
     });
     return _cachedClient;
   } catch (err) {
@@ -116,6 +139,410 @@ export async function testSupabaseConnection(customUrl?: string, customKey?: str
   }
 }
 
+// --------------------------------------------------------------------------
+// Realtime Subscription with postgres_changes
+// --------------------------------------------------------------------------
+
+/**
+ * Starts live realtime subscriptions using Supabase's `postgres_changes`.
+ * Subscribes to events (INSERT, UPDATE, DELETE) across all 4 tables:
+ * - records (Hafalan & Tahsin)
+ * - students (Peserta Didik)
+ * - teachers (Guru Qur'an)
+ * - users (Akun Pengguna & Password)
+ */
+export function startRealtimeSubscription(onDataChanged?: () => void): (() => void) | null {
+  const supabase = getSupabaseClient();
+  if (!supabase) {
+    setRealtimeStatus('DISCONNECTED');
+    return null;
+  }
+
+  if (_activeRealtimeChannel) {
+    return () => stopRealtimeSubscription();
+  }
+
+  setRealtimeStatus('CONNECTING');
+
+  const channelName = 'salam_quran_postgres_changes';
+  const channel = supabase.channel(channelName);
+
+  // 1. Listen for changes on records table
+  channel.on(
+    'postgres_changes',
+    { event: '*', schema: 'public', table: 'records' },
+    (payload) => {
+      try {
+        const stored = localStorage.getItem('salam_quran_records_prod_v2');
+        let records: HafalanRecord[] = stored ? JSON.parse(stored) : [];
+
+        if (payload.eventType === 'INSERT') {
+          const r = payload.new as any;
+          const newRec: HafalanRecord = {
+            id: r.id,
+            date: r.date,
+            studentId: r.student_id,
+            studentName: r.student_name,
+            className: r.class_name,
+            teacherId: r.teacher_id,
+            teacherName: r.teacher_name,
+            type: r.type,
+            tahsinBook: r.tahsin_book || undefined,
+            page: r.page || undefined,
+            juz: r.juz ? Number(r.juz) : undefined,
+            surahNumber: r.surah_number ? Number(r.surah_number) : undefined,
+            surahName: r.surah_name || undefined,
+            ayatRange: r.ayat_range || undefined,
+            grade: r.grade,
+            notes: r.notes || undefined,
+            createdAt: r.created_at || new Date().toISOString(),
+          };
+
+          // Check if already exists
+          const existingIdx = records.findIndex((item) => item.id === newRec.id);
+          if (existingIdx >= 0) {
+            records[existingIdx] = newRec;
+          } else {
+            records.unshift(newRec);
+          }
+          localStorage.setItem('salam_quran_records_prod_v2', JSON.stringify(records));
+        } else if (payload.eventType === 'UPDATE') {
+          const r = payload.new as any;
+          const updatedRec: HafalanRecord = {
+            id: r.id,
+            date: r.date,
+            studentId: r.student_id,
+            studentName: r.student_name,
+            className: r.class_name,
+            teacherId: r.teacher_id,
+            teacherName: r.teacher_name,
+            type: r.type,
+            tahsinBook: r.tahsin_book || undefined,
+            page: r.page || undefined,
+            juz: r.juz ? Number(r.juz) : undefined,
+            surahNumber: r.surah_number ? Number(r.surah_number) : undefined,
+            surahName: r.surah_name || undefined,
+            ayatRange: r.ayat_range || undefined,
+            grade: r.grade,
+            notes: r.notes || undefined,
+            createdAt: r.created_at || new Date().toISOString(),
+          };
+
+          const idx = records.findIndex((item) => item.id === updatedRec.id);
+          if (idx >= 0) {
+            records[idx] = updatedRec;
+          } else {
+            records.unshift(updatedRec);
+          }
+          localStorage.setItem('salam_quran_records_prod_v2', JSON.stringify(records));
+        } else if (payload.eventType === 'DELETE') {
+          const oldId = payload.old?.id;
+          if (oldId) {
+            records = records.filter((item) => item.id !== oldId);
+            localStorage.setItem('salam_quran_records_prod_v2', JSON.stringify(records));
+          }
+        }
+
+        window.dispatchEvent(new Event('salam_storage_changed'));
+        if (onDataChanged) onDataChanged();
+      } catch (err) {
+        console.warn('Error processing realtime records payload:', err);
+      }
+    }
+  );
+
+  // 2. Listen for changes on students table
+  channel.on(
+    'postgres_changes',
+    { event: '*', schema: 'public', table: 'students' },
+    (payload) => {
+      try {
+        const stored = localStorage.getItem('salam_quran_students_v1');
+        let students: Student[] = stored ? JSON.parse(stored) : INITIAL_STUDENTS;
+
+        if (payload.eventType === 'INSERT' || payload.eventType === 'UPDATE') {
+          const s = payload.new as any;
+          const studentItem: Student = {
+            id: s.id,
+            name: s.name,
+            className: s.class_name,
+            waliUsername: s.wali_username,
+            parentPhone: s.parent_phone || undefined,
+          };
+          const idx = students.findIndex((item) => item.id === studentItem.id);
+          if (idx >= 0) {
+            students[idx] = studentItem;
+          } else {
+            students.push(studentItem);
+          }
+          localStorage.setItem('salam_quran_students_v1', JSON.stringify(students));
+        } else if (payload.eventType === 'DELETE') {
+          const oldId = payload.old?.id;
+          if (oldId) {
+            students = students.filter((item) => item.id !== oldId);
+            localStorage.setItem('salam_quran_students_v1', JSON.stringify(students));
+          }
+        }
+
+        window.dispatchEvent(new Event('salam_storage_changed'));
+        if (onDataChanged) onDataChanged();
+      } catch (err) {
+        console.warn('Error processing realtime students payload:', err);
+      }
+    }
+  );
+
+  // 3. Listen for changes on teachers table
+  channel.on(
+    'postgres_changes',
+    { event: '*', schema: 'public', table: 'teachers' },
+    (payload) => {
+      try {
+        const stored = localStorage.getItem('salam_quran_teachers_v1');
+        let teachers: Teacher[] = stored ? JSON.parse(stored) : INITIAL_TEACHERS;
+
+        if (payload.eventType === 'INSERT' || payload.eventType === 'UPDATE') {
+          const t = payload.new as any;
+          const teacherItem: Teacher = {
+            id: t.id,
+            name: t.name,
+            title: t.title || "Guru Qur'an",
+            username: t.username,
+          };
+          const idx = teachers.findIndex((item) => item.id === teacherItem.id);
+          if (idx >= 0) {
+            teachers[idx] = teacherItem;
+          } else {
+            teachers.push(teacherItem);
+          }
+          localStorage.setItem('salam_quran_teachers_v1', JSON.stringify(teachers));
+        } else if (payload.eventType === 'DELETE') {
+          const oldId = payload.old?.id;
+          if (oldId) {
+            teachers = teachers.filter((item) => item.id !== oldId);
+            localStorage.setItem('salam_quran_teachers_v1', JSON.stringify(teachers));
+          }
+        }
+
+        window.dispatchEvent(new Event('salam_storage_changed'));
+        if (onDataChanged) onDataChanged();
+      } catch (err) {
+        console.warn('Error processing realtime teachers payload:', err);
+      }
+    }
+  );
+
+  // 4. Listen for changes on users table
+  channel.on(
+    'postgres_changes',
+    { event: '*', schema: 'public', table: 'users' },
+    (payload) => {
+      try {
+        const stored = localStorage.getItem('salam_quran_users_v1');
+        let users: UserAccount[] = stored ? JSON.parse(stored) : [];
+
+        if (payload.eventType === 'INSERT' || payload.eventType === 'UPDATE') {
+          const u = payload.new as any;
+          const userItem: UserAccount = {
+            id: u.id,
+            username: u.username,
+            fullName: u.full_name,
+            role: u.role,
+            password: u.password,
+            isDefaultPassword: u.is_default_password,
+            teacherId: u.teacher_id || undefined,
+            studentId: u.student_id || undefined,
+            className: u.class_name || undefined,
+          };
+
+          const idx = users.findIndex((item) => item.id === userItem.id);
+          if (idx >= 0) {
+            users[idx] = userItem;
+          } else {
+            users.push(userItem);
+          }
+          localStorage.setItem('salam_quran_users_v1', JSON.stringify(users));
+
+          // If current session user was updated (e.g. password changed remotely), update current session
+          const sessionStored = localStorage.getItem('salam_quran_session_v1');
+          if (sessionStored) {
+            const currentSession: UserAccount = JSON.parse(sessionStored);
+            if (currentSession.id === userItem.id) {
+              localStorage.setItem('salam_quran_session_v1', JSON.stringify(userItem));
+              window.dispatchEvent(new Event('salam_session_changed'));
+            }
+          }
+        } else if (payload.eventType === 'DELETE') {
+          const oldId = payload.old?.id;
+          if (oldId) {
+            users = users.filter((item) => item.id !== oldId);
+            localStorage.setItem('salam_quran_users_v1', JSON.stringify(users));
+          }
+        }
+
+        window.dispatchEvent(new Event('salam_storage_changed'));
+        if (onDataChanged) onDataChanged();
+      } catch (err) {
+        console.warn('Error processing realtime users payload:', err);
+      }
+    }
+  );
+
+  // Subscribe channel and track connection status
+  channel.subscribe((status, err) => {
+    if (status === 'SUBSCRIBED') {
+      setRealtimeStatus('CONNECTED');
+    } else if (status === 'CHANNEL_ERROR') {
+      console.warn('Realtime channel error:', err);
+      setRealtimeStatus('ERROR');
+    } else if (status === 'TIMED_OUT') {
+      console.warn('Realtime channel timed out, retrying...');
+      setRealtimeStatus('CONNECTING');
+    } else if (status === 'CLOSED') {
+      setRealtimeStatus('DISCONNECTED');
+    }
+  });
+
+  _activeRealtimeChannel = channel;
+
+  return () => {
+    stopRealtimeSubscription();
+  };
+}
+
+export function stopRealtimeSubscription(): void {
+  if (_activeRealtimeChannel) {
+    try {
+      const supabase = getSupabaseClient();
+      if (supabase) {
+        supabase.removeChannel(_activeRealtimeChannel);
+      }
+    } catch {
+      // ignore
+    }
+    _activeRealtimeChannel = null;
+  }
+  setRealtimeStatus('DISCONNECTED');
+}
+
+/**
+ * Generates sample clean TypeScript subscription code for documentation and copy-pasting
+ */
+export function getSubscriptionCodeSample(): string {
+  const config = getSupabaseConfig();
+  const sampleUrl = config.url || 'https://YOUR_PROJECT_ID.supabase.co';
+  const sampleKey = config.anonKey || 'YOUR_ANON_PUBLIC_KEY';
+
+  return `// ========================================================
+// KODE REALTIME SUBSCRIPTION SUPABASE (postgres_changes)
+// SALAM Quran - SDIT Salsabila 3 Banguntapan
+// ========================================================
+// Kode ini berlangganan secara langsung ke perubahan database
+// PostgreSQL (INSERT, UPDATE, DELETE) di tabel records,
+// students, teachers, dan users secara real-time.
+// ========================================================
+
+import { createClient } from '@supabase/supabase-js';
+
+// 1. Inisialisasi Supabase Client
+const supabaseUrl = '${sampleUrl}';
+const supabaseAnonKey = '${sampleKey}';
+const supabase = createClient(supabaseUrl, supabaseAnonKey);
+
+// 2. Buat Channel Subscription Realtime
+const channel = supabase
+  .channel('salam_quran_postgres_changes')
+
+  // ----------------------------------------------------
+  // A. Langganan Setoran Hafalan & Tahsin Siswa (records)
+  // ----------------------------------------------------
+  .on(
+    'postgres_changes',
+    {
+      event: '*', // Menangkap event INSERT, UPDATE, dan DELETE
+      schema: 'public',
+      table: 'records',
+    },
+    (payload) => {
+      console.log('Perubahan Data Hafalan:', payload.eventType, payload.new || payload.old);
+      // Contoh pembaruan UI:
+      // if (payload.eventType === 'INSERT') addRecordToUI(payload.new);
+      // if (payload.eventType === 'UPDATE') updateRecordInUI(payload.new);
+      // if (payload.eventType === 'DELETE') removeRecordFromUI(payload.old.id);
+    }
+  )
+
+  // ----------------------------------------------------
+  // B. Langganan Data Peserta Didik (students)
+  // ----------------------------------------------------
+  .on(
+    'postgres_changes',
+    {
+      event: '*',
+      schema: 'public',
+      table: 'students',
+    },
+    (payload) => {
+      console.log('Perubahan Data Siswa:', payload.eventType, payload.new || payload.old);
+    }
+  )
+
+  // ----------------------------------------------------
+  // C. Langganan Data Guru Pengampu (teachers)
+  // ----------------------------------------------------
+  .on(
+    'postgres_changes',
+    {
+      event: '*',
+      schema: 'public',
+      table: 'teachers',
+    },
+    (payload) => {
+      console.log('Perubahan Data Guru:', payload.eventType, payload.new || payload.old);
+    }
+  )
+
+  // ----------------------------------------------------
+  // D. Langganan Akun Pengguna & Password (users)
+  // ----------------------------------------------------
+  .on(
+    'postgres_changes',
+    {
+      event: '*',
+      schema: 'public',
+      table: 'users',
+    },
+    (payload) => {
+      console.log('Perubahan Akun Pengguna:', payload.eventType, payload.new || payload.old);
+    }
+  )
+
+  // ----------------------------------------------------
+  // E. Jalankan Subscription & Monitor Status Koneksi
+  // ----------------------------------------------------
+  .subscribe((status, err) => {
+    if (status === 'SUBSCRIBED') {
+      console.log('✅ Realtime postgres_changes aktif dan terhubung!');
+    } else if (status === 'CHANNEL_ERROR') {
+      console.error('❌ Terjadi kesalahan pada channel realtime:', err);
+    } else if (status === 'TIMED_OUT') {
+      console.warn('⚠️ Koneksi realtime timed out, mencoba menyambung ulang...');
+    } else if (status === 'CLOSED') {
+      console.log('ℹ️ Channel realtime ditutup.');
+    }
+  });
+
+// Untuk berhenti berlangganan saat komponen unmount:
+// export function cleanup() {
+//   supabase.removeChannel(channel);
+// }
+`;
+}
+
+// --------------------------------------------------------------------------
+// SQL Schema & Data Seed Generator
+// --------------------------------------------------------------------------
+
 /**
  * Escape single quotes for SQL string literals
  */
@@ -135,7 +562,7 @@ export function getSupabaseDdlSchema(): string {
 -- Petunjuk:
 -- 1. Buka dashboard Supabase (https://app.supabase.com)
 -- 2. Pilih project Anda -> Masuk ke menu "SQL Editor"
--- 3. Tempelkan seluruh skrip di bawah ini dan klik "RUN"
+-- 3. Tempelkan seluruh skrip ini dan klik "RUN"
 -- 4. Semua tabel otomatis terdaftar di "supabase_realtime"
 -- ========================================================
 
@@ -206,71 +633,56 @@ ALTER TABLE public.students ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.users ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.records ENABLE ROW LEVEL SECURITY;
 
--- 7. Kebijakan Akses (RLS Policies)
-DROP POLICY IF EXISTS "Public Read Teachers" ON public.teachers;
-DROP POLICY IF EXISTS "Public Insert/Update Teachers" ON public.teachers;
-CREATE POLICY "Public Read Teachers" ON public.teachers FOR SELECT USING (true);
-CREATE POLICY "Public Insert/Update Teachers" ON public.teachers FOR ALL USING (true);
+-- 7. Kebijakan Akses (RLS Policies Permisif untuk Anon Key PWA)
+DROP POLICY IF EXISTS "Public Full Access Teachers" ON public.teachers;
+CREATE POLICY "Public Full Access Teachers" ON public.teachers FOR ALL USING (true) WITH CHECK (true);
 
-DROP POLICY IF EXISTS "Public Read Students" ON public.students;
-DROP POLICY IF EXISTS "Public Insert/Update Students" ON public.students;
-CREATE POLICY "Public Read Students" ON public.students FOR SELECT USING (true);
-CREATE POLICY "Public Insert/Update Students" ON public.students FOR ALL USING (true);
+DROP POLICY IF EXISTS "Public Full Access Students" ON public.students;
+CREATE POLICY "Public Full Access Students" ON public.students FOR ALL USING (true) WITH CHECK (true);
 
-DROP POLICY IF EXISTS "Public Read Users" ON public.users;
-DROP POLICY IF EXISTS "Public Modify Users" ON public.users;
-CREATE POLICY "Public Read Users" ON public.users FOR SELECT USING (true);
-CREATE POLICY "Public Modify Users" ON public.users FOR ALL USING (true);
+DROP POLICY IF EXISTS "Public Full Access Users" ON public.users;
+CREATE POLICY "Public Full Access Users" ON public.users FOR ALL USING (true) WITH CHECK (true);
 
-DROP POLICY IF EXISTS "Public Read Records" ON public.records;
-DROP POLICY IF EXISTS "Public Insert Records" ON public.records;
-DROP POLICY IF EXISTS "Public Update Records" ON public.records;
-DROP POLICY IF EXISTS "Public Delete Records" ON public.records;
-CREATE POLICY "Public Read Records" ON public.records FOR SELECT USING (true);
-CREATE POLICY "Public Insert Records" ON public.records FOR INSERT WITH CHECK (true);
-CREATE POLICY "Public Update Records" ON public.records FOR UPDATE USING (true);
-CREATE POLICY "Public Delete Records" ON public.records FOR DELETE USING (true);
+DROP POLICY IF EXISTS "Public Full Access Records" ON public.records;
+CREATE POLICY "Public Full Access Records" ON public.records FOR ALL USING (true) WITH CHECK (true);
 
--- 8. REPLICA IDENTITY FULL (Wajib untuk Supabase Realtime CDC)
+-- 8. REPLICA IDENTITY FULL (Wajib untuk Supabase Realtime CDC postgres_changes)
 ALTER TABLE public.records REPLICA IDENTITY FULL;
 ALTER TABLE public.students REPLICA IDENTITY FULL;
 ALTER TABLE public.teachers REPLICA IDENTITY FULL;
 ALTER TABLE public.users REPLICA IDENTITY FULL;
 
--- 9. Daftarkan Tabel ke Publikasi Supabase Realtime
-BEGIN;
-  DO $$
-  BEGIN
-    IF NOT EXISTS (
-      SELECT 1 FROM pg_publication_tables 
-      WHERE pubname = 'supabase_realtime' AND schemaname = 'public' AND tablename = 'records'
-    ) THEN
-      ALTER PUBLICATION supabase_realtime ADD TABLE public.records;
-    END IF;
+-- 9. Daftarkan Seluruh Tabel ke Publikasi Supabase Realtime
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_publication_tables 
+    WHERE pubname = 'supabase_realtime' AND schemaname = 'public' AND tablename = 'records'
+  ) THEN
+    ALTER PUBLICATION supabase_realtime ADD TABLE public.records;
+  END IF;
 
-    IF NOT EXISTS (
-      SELECT 1 FROM pg_publication_tables 
-      WHERE pubname = 'supabase_realtime' AND schemaname = 'public' AND tablename = 'students'
-    ) THEN
-      ALTER PUBLICATION supabase_realtime ADD TABLE public.students;
-    END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_publication_tables 
+    WHERE pubname = 'supabase_realtime' AND schemaname = 'public' AND tablename = 'students'
+  ) THEN
+    ALTER PUBLICATION supabase_realtime ADD TABLE public.students;
+  END IF;
 
-    IF NOT EXISTS (
-      SELECT 1 FROM pg_publication_tables 
-      WHERE pubname = 'supabase_realtime' AND schemaname = 'public' AND tablename = 'teachers'
-    ) THEN
-      ALTER PUBLICATION supabase_realtime ADD TABLE public.teachers;
-    END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_publication_tables 
+    WHERE pubname = 'supabase_realtime' AND schemaname = 'public' AND tablename = 'teachers'
+  ) THEN
+    ALTER PUBLICATION supabase_realtime ADD TABLE public.teachers;
+  END IF;
 
-    IF NOT EXISTS (
-      SELECT 1 FROM pg_publication_tables 
-      WHERE pubname = 'supabase_realtime' AND schemaname = 'public' AND tablename = 'users'
-    ) THEN
-      ALTER PUBLICATION supabase_realtime ADD TABLE public.users;
-    END IF;
-  END
-  $$;
-COMMIT;
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_publication_tables 
+    WHERE pubname = 'supabase_realtime' AND schemaname = 'public' AND tablename = 'users'
+  ) THEN
+    ALTER PUBLICATION supabase_realtime ADD TABLE public.users;
+  END IF;
+END $$;
 `;
 }
 
@@ -342,13 +754,10 @@ INSERT INTO public.teachers (id, name, title, username) VALUES
   sql += `ON CONFLICT (id) DO UPDATE SET
   name = EXCLUDED.name,
   title = EXCLUDED.title,
-  username = EXCLUDED.username;
-
-`;
+  username = EXCLUDED.username;\n\n`;
 
   // 2. INSERT DATA SISWA
   sql += `-- 2. INSERT DATA PESERTA DIDIK (${students.length} Siswa, 19 Kelas)\n`;
-  // Chunk in batches of 100 for maximum PostgreSQL parsing reliability
   const CHUNK_SIZE = 100;
   for (let i = 0; i < students.length; i += CHUNK_SIZE) {
     const chunk = students.slice(i, i + CHUNK_SIZE);
@@ -393,7 +802,20 @@ INSERT INTO public.teachers (id, name, title, username) VALUES
         r => `  (${sqlEscape(r.id)}, ${sqlEscape(r.date)}, ${sqlEscape(r.studentId)}, ${sqlEscape(r.studentName)}, ${sqlEscape(r.className)}, ${sqlEscape(r.teacherId)}, ${sqlEscape(r.teacherName)}, ${sqlEscape(r.type)}, ${sqlEscape(r.tahsinBook)}, ${sqlEscape(r.page)}, ${r.juz || 'NULL'}, ${r.surahNumber || 'NULL'}, ${sqlEscape(r.surahName)}, ${sqlEscape(r.ayatRange)}, ${sqlEscape(r.grade)}, ${sqlEscape(r.notes)}, ${sqlEscape(r.createdAt || new Date().toISOString())})`
       );
       sql += recordRows.join(',\n') + '\n';
-      sql += `ON CONFLICT (id) DO NOTHING;\n\n`;
+      sql += `ON CONFLICT (id) DO UPDATE SET
+  date = EXCLUDED.date,
+  student_name = EXCLUDED.student_name,
+  class_name = EXCLUDED.class_name,
+  teacher_name = EXCLUDED.teacher_name,
+  type = EXCLUDED.type,
+  tahsin_book = EXCLUDED.tahsin_book,
+  page = EXCLUDED.page,
+  juz = EXCLUDED.juz,
+  surah_number = EXCLUDED.surah_number,
+  surah_name = EXCLUDED.surah_name,
+  ayat_range = EXCLUDED.ayat_range,
+  grade = EXCLUDED.grade,
+  notes = EXCLUDED.notes;\n\n`;
     }
   }
 
@@ -418,15 +840,16 @@ export function getCompleteSupabaseSql(
 ${seed}`;
 }
 
-/**
- * Legacy alias for backwards compatibility
- */
 export function getSupabaseSqlSchema(): string {
   return getCompleteSupabaseSql();
 }
 
+// --------------------------------------------------------------------------
+// Online Synchronizations & CRUD Helpers
+// --------------------------------------------------------------------------
+
 /**
- * Upload local records to Supabase online database
+ * Upsert single record to Supabase
  */
 export async function pushRecordToSupabase(record: HafalanRecord): Promise<boolean> {
   const supabase = getSupabaseClient();
@@ -461,6 +884,247 @@ export async function pushRecordToSupabase(record: HafalanRecord): Promise<boole
   } catch (err) {
     console.warn('Failed to push record to Supabase:', err);
     return false;
+  }
+}
+
+/**
+ * Delete single record from Supabase
+ */
+export async function deleteRecordFromSupabase(id: string): Promise<boolean> {
+  const supabase = getSupabaseClient();
+  if (!supabase) return false;
+
+  try {
+    const { error } = await supabase.from('records').delete().eq('id', id);
+    if (error) {
+      console.warn('Supabase delete record warning:', error.message);
+      return false;
+    }
+    return true;
+  } catch (err) {
+    console.warn('Failed to delete record from Supabase:', err);
+    return false;
+  }
+}
+
+/**
+ * Upsert student & corresponding wali user to Supabase
+ */
+export async function pushStudentToSupabase(student: Student, userAccount?: UserAccount): Promise<boolean> {
+  const supabase = getSupabaseClient();
+  if (!supabase) return false;
+
+  try {
+    const { error: sErr } = await supabase.from('students').upsert({
+      id: student.id,
+      name: student.name,
+      class_name: student.className,
+      wali_username: student.waliUsername,
+      parent_phone: student.parentPhone || null,
+    });
+    if (sErr) throw sErr;
+
+    if (userAccount) {
+      await supabase.from('users').upsert({
+        id: userAccount.id,
+        username: userAccount.username,
+        full_name: userAccount.fullName,
+        role: userAccount.role,
+        password: userAccount.password || 'salsabila3',
+        is_default_password: userAccount.isDefaultPassword ?? true,
+        student_id: student.id,
+        class_name: student.className,
+      });
+    }
+
+    return true;
+  } catch (err) {
+    console.warn('Failed to push student to Supabase:', err);
+    return false;
+  }
+}
+
+/**
+ * Delete student and related records/user from Supabase
+ */
+export async function deleteStudentFromSupabase(studentId: string): Promise<boolean> {
+  const supabase = getSupabaseClient();
+  if (!supabase) return false;
+
+  try {
+    await supabase.from('records').delete().eq('student_id', studentId);
+    await supabase.from('users').delete().eq('student_id', studentId);
+    const { error } = await supabase.from('students').delete().eq('id', studentId);
+    return !error;
+  } catch (err) {
+    console.warn('Failed to delete student from Supabase:', err);
+    return false;
+  }
+}
+
+/**
+ * Upsert teacher & corresponding guru user to Supabase
+ */
+export async function pushTeacherToSupabase(teacher: Teacher, userAccount?: UserAccount): Promise<boolean> {
+  const supabase = getSupabaseClient();
+  if (!supabase) return false;
+
+  try {
+    const { error: tErr } = await supabase.from('teachers').upsert({
+      id: teacher.id,
+      name: teacher.name,
+      title: teacher.title || "Guru Qur'an",
+      username: teacher.username,
+    });
+    if (tErr) throw tErr;
+
+    if (userAccount) {
+      await supabase.from('users').upsert({
+        id: userAccount.id,
+        username: userAccount.username,
+        full_name: userAccount.fullName,
+        role: userAccount.role,
+        password: userAccount.password || 'salsabila3',
+        is_default_password: userAccount.isDefaultPassword ?? true,
+        teacher_id: teacher.id,
+      });
+    }
+
+    return true;
+  } catch (err) {
+    console.warn('Failed to push teacher to Supabase:', err);
+    return false;
+  }
+}
+
+/**
+ * Delete teacher from Supabase
+ */
+export async function deleteTeacherFromSupabase(teacherId: string): Promise<boolean> {
+  const supabase = getSupabaseClient();
+  if (!supabase) return false;
+
+  try {
+    await supabase.from('users').delete().eq('teacher_id', teacherId);
+    const { error } = await supabase.from('teachers').delete().eq('id', teacherId);
+    return !error;
+  } catch (err) {
+    console.warn('Failed to delete teacher from Supabase:', err);
+    return false;
+  }
+}
+
+/**
+ * Update user password in Supabase
+ */
+export async function updateUserPasswordInSupabase(userId: string, newPassword: string, isDefaultPassword = false): Promise<boolean> {
+  const supabase = getSupabaseClient();
+  if (!supabase) return false;
+
+  try {
+    const { error } = await supabase.from('users').update({
+      password: newPassword,
+      is_default_password: isDefaultPassword,
+    }).eq('id', userId);
+    return !error;
+  } catch (err) {
+    console.warn('Failed to update password in Supabase:', err);
+    return false;
+  }
+}
+
+/**
+ * Batch push all local data to Supabase (Seeding / syncing from browser directly)
+ */
+export async function pushAllDataToSupabase(
+  teachers: Teacher[],
+  students: Student[],
+  users: UserAccount[],
+  records: HafalanRecord[]
+): Promise<{ success: boolean; message: string }> {
+  const supabase = getSupabaseClient();
+  if (!supabase) {
+    return { success: false, message: 'Supabase belum terkonfigurasi.' };
+  }
+
+  try {
+    // 1. Teachers
+    if (teachers.length > 0) {
+      const teachersPayload = teachers.map((t) => ({
+        id: t.id,
+        name: t.name,
+        title: t.title || "Guru Qur'an",
+        username: t.username,
+      }));
+      const { error: tErr } = await supabase.from('teachers').upsert(teachersPayload);
+      if (tErr) throw new Error(`Guru: ${tErr.message}`);
+    }
+
+    // 2. Students in batches of 100
+    const BATCH_SIZE = 100;
+    for (let i = 0; i < students.length; i += BATCH_SIZE) {
+      const chunk = students.slice(i, i + BATCH_SIZE).map((s) => ({
+        id: s.id,
+        name: s.name,
+        class_name: s.className,
+        wali_username: s.waliUsername,
+        parent_phone: s.parentPhone || null,
+      }));
+      const { error: sErr } = await supabase.from('students').upsert(chunk);
+      if (sErr) throw new Error(`Siswa: ${sErr.message}`);
+    }
+
+    // 3. Users in batches of 100
+    for (let i = 0; i < users.length; i += BATCH_SIZE) {
+      const chunk = users.slice(i, i + BATCH_SIZE).map((u) => ({
+        id: u.id,
+        username: u.username,
+        full_name: u.fullName,
+        role: u.role,
+        password: u.password || 'salsabila3',
+        is_default_password: u.isDefaultPassword ?? true,
+        teacher_id: u.teacherId || null,
+        student_id: u.studentId || null,
+        class_name: u.className || null,
+      }));
+      const { error: uErr } = await supabase.from('users').upsert(chunk);
+      if (uErr) throw new Error(`Akun Pengguna: ${uErr.message}`);
+    }
+
+    // 4. Records in batches of 100
+    if (records.length > 0) {
+      for (let i = 0; i < records.length; i += BATCH_SIZE) {
+        const chunk = records.slice(i, i + BATCH_SIZE).map((r) => ({
+          id: r.id,
+          date: r.date,
+          student_id: r.studentId,
+          student_name: r.studentName,
+          class_name: r.className,
+          teacher_id: r.teacherId,
+          teacher_name: r.teacherName,
+          type: r.type,
+          tahsin_book: r.tahsinBook || null,
+          page: r.page || null,
+          juz: r.juz || null,
+          surah_number: r.surahNumber || null,
+          surah_name: r.surahName || null,
+          ayat_range: r.ayatRange || null,
+          grade: r.grade,
+          notes: r.notes || null,
+          created_at: r.createdAt || new Date().toISOString(),
+        }));
+        const { error: rErr } = await supabase.from('records').upsert(chunk);
+        if (rErr) throw new Error(`Catatan: ${rErr.message}`);
+      }
+    }
+
+    return {
+      success: true,
+      message: `Berhasil mengunggah seluruh data ke Supabase! (${teachers.length} Guru, ${students.length} Siswa, ${users.length} Akun, ${records.length} Catatan)`,
+    };
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : 'Gagal mengirim data ke Supabase';
+    return { success: false, message: msg };
   }
 }
 
@@ -559,5 +1223,55 @@ export async function fetchAllFromSupabase(): Promise<{
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : 'Gagal mengambil data dari Supabase.';
     return { error: msg };
+  }
+}
+
+/**
+ * Online authentication fallback: checks Supabase users table directly
+ */
+export async function authenticateWithSupabase(usernameInput: string, passwordInput: string): Promise<{
+  success: boolean;
+  user?: UserAccount;
+  error?: string;
+}> {
+  const supabase = getSupabaseClient();
+  if (!supabase) {
+    return { success: false, error: 'Koneksi online tidak tersedia.' };
+  }
+
+  try {
+    const cleanUsername = usernameInput.trim().toLowerCase();
+    const { data, error } = await supabase
+      .from('users')
+      .select('*')
+      .ilike('username', cleanUsername)
+      .limit(1);
+
+    if (error || !data || data.length === 0) {
+      return { success: false, error: 'Username tidak ditemukan di database Supabase.' };
+    }
+
+    const row = data[0];
+    const validPassword = row.password || 'salsabila3';
+    if (passwordInput !== validPassword) {
+      return { success: false, error: 'Password salah.' };
+    }
+
+    const user: UserAccount = {
+      id: row.id,
+      username: row.username,
+      fullName: row.full_name,
+      role: row.role,
+      password: row.password,
+      isDefaultPassword: row.is_default_password,
+      teacherId: row.teacher_id,
+      studentId: row.student_id,
+      className: row.class_name,
+    };
+
+    return { success: true, user };
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : 'Gagal verifikasi login ke Supabase.';
+    return { success: false, error: msg };
   }
 }

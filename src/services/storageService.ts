@@ -1,6 +1,16 @@
 import { Teacher, Student, HafalanRecord, UserAccount, Role } from '../types';
 import { INITIAL_TEACHERS, INITIAL_STUDENTS, INITIAL_RECORDS } from '../data/initialData';
-import { pushRecordToSupabase, getSupabaseClient } from './supabaseService';
+import {
+  pushRecordToSupabase,
+  deleteRecordFromSupabase,
+  pushStudentToSupabase,
+  deleteStudentFromSupabase,
+  pushTeacherToSupabase,
+  deleteTeacherFromSupabase,
+  updateUserPasswordInSupabase,
+  authenticateWithSupabase,
+  getSupabaseClient
+} from './supabaseService';
 import * as XLSX from 'xlsx';
 
 const KEY_TEACHERS = 'salam_quran_teachers_v1';
@@ -110,7 +120,7 @@ export function addTeacher(name: string, title = 'Guru Qur\'an'): Teacher {
 
   // create user account
   const users = getUserAccounts();
-  users.push({
+  const userAccount: UserAccount = {
     id: `u_${newTeacher.id}`,
     username: newTeacher.username,
     fullName: newTeacher.name,
@@ -118,8 +128,12 @@ export function addTeacher(name: string, title = 'Guru Qur\'an'): Teacher {
     password: DEFAULT_PASSWORD,
     isDefaultPassword: true,
     teacherId: newTeacher.id
-  });
+  };
+  users.push(userAccount);
   saveUserAccounts(users);
+
+  // Sync to Supabase online
+  pushTeacherToSupabase(newTeacher, userAccount).catch(() => {});
 
   return newTeacher;
 }
@@ -130,6 +144,9 @@ export function deleteTeacher(teacherId: string): void {
 
   const users = getUserAccounts().filter(u => u.teacherId !== teacherId);
   saveUserAccounts(users);
+
+  // Delete from Supabase online
+  deleteTeacherFromSupabase(teacherId).catch(() => {});
 }
 
 // ----------------------------------------------------
@@ -171,7 +188,7 @@ export function addStudent(name: string, className: string): Student {
 
   // create user account for wali
   const users = getUserAccounts();
-  users.push({
+  const userAccount: UserAccount = {
     id: `u_${newStudent.id}`,
     username: newStudent.waliUsername,
     fullName: `Wali dari ${newStudent.name}`,
@@ -180,8 +197,12 @@ export function addStudent(name: string, className: string): Student {
     isDefaultPassword: true,
     studentId: newStudent.id,
     className: newStudent.className
-  });
+  };
+  users.push(userAccount);
   saveUserAccounts(users);
+
+  // Sync to Supabase online
+  pushStudentToSupabase(newStudent, userAccount).catch(() => {});
 
   return newStudent;
 }
@@ -196,6 +217,9 @@ export function deleteStudent(studentId: string): void {
   // remove corresponding records
   const records = getRecords().filter(r => r.studentId !== studentId);
   saveRecords(records);
+
+  // Delete from Supabase online
+  deleteStudentFromSupabase(studentId).catch(() => {});
 }
 
 // ----------------------------------------------------
@@ -256,13 +280,9 @@ export function deleteRecord(id: string): void {
   saveRecords(records);
 
   // Delete from Supabase if online
-  const supabase = getSupabaseClient();
-  if (supabase) {
-    supabase.from('records').delete().eq('id', id).then(
-      () => {},
-      (err) => console.debug('Delete sync skipped or offline:', err)
-    );
-  }
+  deleteRecordFromSupabase(id).catch((err) => {
+    console.debug('Delete sync skipped or offline:', err);
+  });
 }
 
 /**
@@ -362,6 +382,32 @@ export function authenticate(usernameInput: string, passwordInput: string): { su
   return { success: true, user };
 }
 
+export async function authenticateAsync(
+  usernameInput: string,
+  passwordInput: string
+): Promise<{ success: boolean; user?: UserAccount; error?: string }> {
+  // First attempt local authentication
+  const localRes = authenticate(usernameInput, passwordInput);
+  if (localRes.success) return localRes;
+
+  // Fallback: Check online against Supabase users table
+  const onlineRes = await authenticateWithSupabase(usernameInput, passwordInput);
+  if (onlineRes.success && onlineRes.user) {
+    // Merge remote user into local storage cache
+    const users = getUserAccounts();
+    const idx = users.findIndex(u => u.id === onlineRes.user!.id);
+    if (idx >= 0) {
+      users[idx] = onlineRes.user;
+    } else {
+      users.push(onlineRes.user);
+    }
+    saveUserAccounts(users);
+    return onlineRes;
+  }
+
+  return localRes;
+}
+
 export function changeUserPassword(userId: string, newPassword: string): boolean {
   const users = getUserAccounts();
   const index = users.findIndex(u => u.id === userId);
@@ -378,6 +424,9 @@ export function changeUserPassword(userId: string, newPassword: string): boolean
     current.isDefaultPassword = false;
     setCurrentSession(current);
   }
+
+  // Sync to Supabase online
+  updateUserPasswordInSupabase(userId, newPassword, false).catch(() => {});
 
   return true;
 }
@@ -399,6 +448,15 @@ export function resetAllPasswordsToDefault(): void {
     current.password = DEFAULT_PASSWORD;
     current.isDefaultPassword = true;
     setCurrentSession(current);
+  }
+
+  // Update all in Supabase
+  const supabase = getSupabaseClient();
+  if (supabase) {
+    supabase.from('users').update({
+      password: DEFAULT_PASSWORD,
+      is_default_password: true,
+    }).neq('id', '').then(() => {}, () => {});
   }
 }
 

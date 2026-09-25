@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { UserAccount, Teacher, Student } from '../types';
-import { authenticate, getTeachers, getStudents, DEFAULT_PASSWORD } from '../services/storageService';
+import { authenticateAsync, getTeachers, getStudents, DEFAULT_PASSWORD } from '../services/storageService';
 import { BookOpen, UserCheck, ShieldCheck, Lock, User, ArrowRight, Sparkles, Check, ChevronDown, Search } from 'lucide-react';
 import { PWAInstallButton } from './PWAInstallButton';
 
@@ -44,13 +44,13 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onLoginSuccess }) => {
     }
   };
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError('');
     setLoading(true);
 
-    setTimeout(() => {
-      const result = authenticate(username, password);
+    try {
+      const result = await authenticateAsync(username, password);
       setLoading(false);
 
       if (result.success && result.user) {
@@ -58,7 +58,10 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onLoginSuccess }) => {
       } else {
         setError(result.error || 'Username atau password salah.');
       }
-    }, 300);
+    } catch {
+      setLoading(false);
+      setError('Terjadi kendala saat login. Silakan coba lagi.');
+    }
   };
 
   return (

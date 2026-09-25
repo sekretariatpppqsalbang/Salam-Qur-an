@@ -9,7 +9,14 @@ import {
   initStorage,
   getCurrentSession,
   setCurrentSession,
+  applySupabaseSyncData,
 } from './services/storageService';
+import {
+  getSupabaseConfig,
+  startRealtimeSubscription,
+  stopRealtimeSubscription,
+  fetchAllFromSupabase,
+} from './services/supabaseService';
 import { Navbar } from './components/Navbar';
 import { LoginPage } from './components/LoginPage';
 import { GuruDashboard } from './components/GuruDashboard';
@@ -36,13 +43,46 @@ export default function App() {
     }
     setInitialized(true);
 
+    // Initialize Realtime Supabase Subscription (postgres_changes)
+    const setupOnlineConnection = () => {
+      const config = getSupabaseConfig();
+      if (config.isConnected) {
+        startRealtimeSubscription();
+
+        // Background sync to fetch any changes while offline
+        fetchAllFromSupabase().then((res) => {
+          if (!res.error) {
+            applySupabaseSyncData(res);
+          }
+        }).catch(() => {});
+      }
+    };
+
+    setupOnlineConnection();
+
     const handleSessionChange = () => {
       const current = getCurrentSession();
       setCurrentUser(current);
     };
 
+    const handleConfigChange = () => {
+      setupOnlineConnection();
+    };
+
+    const handleOnline = () => {
+      setupOnlineConnection();
+    };
+
     window.addEventListener('salam_session_changed', handleSessionChange);
-    return () => window.removeEventListener('salam_session_changed', handleSessionChange);
+    window.addEventListener('salam_supabase_config_changed', handleConfigChange);
+    window.addEventListener('online', handleOnline);
+
+    return () => {
+      window.removeEventListener('salam_session_changed', handleSessionChange);
+      window.removeEventListener('salam_supabase_config_changed', handleConfigChange);
+      window.removeEventListener('online', handleOnline);
+      stopRealtimeSubscription();
+    };
   }, []);
 
   const handleLoginSuccess = (user: UserAccount) => {

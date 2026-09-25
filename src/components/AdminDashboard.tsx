@@ -23,7 +23,12 @@ import {
   getCompleteSupabaseSql,
   getSupabaseDdlSchema,
   getSupabaseSeedDataSql,
+  getSubscriptionCodeSample,
   fetchAllFromSupabase,
+  pushAllDataToSupabase,
+  getRealtimeStatus,
+  startRealtimeSubscription,
+  RealtimeConnectionStatus,
 } from '../services/supabaseService';
 import * as XLSX from 'xlsx';
 import {
@@ -49,6 +54,7 @@ import {
   Radio,
   FileCode2,
   Layers,
+  Zap,
 } from 'lucide-react';
 
 interface AdminDashboardProps {
@@ -65,11 +71,13 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const [copiedSql, setCopiedSql] = useState(false);
 
   // SQL & Supabase Management States
-  const [sqlViewMode, setSqlViewMode] = useState<'all' | 'schema' | 'seed'>('all');
+  const [sqlViewMode, setSqlViewMode] = useState<'all' | 'schema' | 'seed' | 'subscription'>('all');
   const [supabaseUrl, setSupabaseUrl] = useState(() => getSupabaseConfig().url);
   const [supabaseKey, setSupabaseKey] = useState(() => getSupabaseConfig().anonKey);
   const [isTestingConnection, setIsTestingConnection] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
+  const [isPushing, setIsPushing] = useState(false);
+  const [realtimeStatus, setRealtimeStatus] = useState<RealtimeConnectionStatus>(() => getRealtimeStatus());
   const [syncStatusMsg, setSyncStatusMsg] = useState<{ type: 'success' | 'error' | 'info'; text: string } | null>(null);
 
   // Siswa Management States
@@ -93,8 +101,19 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       setTeachers(getTeachers());
       setUsers(getUserAccounts());
     };
+
+    const handleRealtimeStatus = (e: any) => {
+      if (e.detail?.status) {
+        setRealtimeStatus(e.detail.status);
+      }
+    };
+
     window.addEventListener('salam_storage_changed', handleStorageChange);
-    return () => window.removeEventListener('salam_storage_changed', handleStorageChange);
+    window.addEventListener('salam_realtime_status_changed', handleRealtimeStatus);
+    return () => {
+      window.removeEventListener('salam_storage_changed', handleStorageChange);
+      window.removeEventListener('salam_realtime_status_changed', handleRealtimeStatus);
+    };
   }, []);
 
   const showFeedback = (type: 'success' | 'error', message: string) => {
@@ -632,14 +651,32 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               </div>
 
               {/* Status Indicator */}
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center gap-2">
                 <span className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold border ${
-                  supabaseUrl && supabaseKey
+                  realtimeStatus === 'CONNECTED'
                     ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
-                    : 'bg-amber-50 text-amber-700 border-amber-200'
+                    : realtimeStatus === 'CONNECTING'
+                    ? 'bg-amber-50 text-amber-700 border-amber-200'
+                    : supabaseUrl && supabaseKey
+                    ? 'bg-teal-50 text-teal-700 border-teal-200'
+                    : 'bg-slate-100 text-slate-700 border-slate-200'
                 }`}>
-                  <span className={`w-2 h-2 rounded-full ${supabaseUrl && supabaseKey ? 'bg-emerald-500 animate-pulse' : 'bg-amber-500'}`} />
-                  {supabaseUrl && supabaseKey ? 'Supabase Terkonfigurasi' : 'Mode Offline / Lokal'}
+                  <span className={`w-2 h-2 rounded-full ${
+                    realtimeStatus === 'CONNECTED'
+                      ? 'bg-emerald-500 animate-pulse'
+                      : realtimeStatus === 'CONNECTING'
+                      ? 'bg-amber-500 animate-ping'
+                      : supabaseUrl && supabaseKey
+                      ? 'bg-teal-500'
+                      : 'bg-slate-400'
+                  }`} />
+                  {realtimeStatus === 'CONNECTED'
+                    ? 'Realtime Aktif (postgres_changes)'
+                    : realtimeStatus === 'CONNECTING'
+                    ? 'Menyambungkan Realtime...'
+                    : supabaseUrl && supabaseKey
+                    ? 'Supabase Terhubung'
+                    : 'Mode Offline / Lokal'}
                 </span>
               </div>
             </div>
@@ -707,6 +744,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                     type: res.success ? 'success' : 'error',
                     text: res.message
                   });
+                  if (res.success) {
+                    startRealtimeSubscription();
+                  }
                 }}
                 disabled={isTestingConnection}
                 className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-[#00C2A0] text-white text-xs font-bold hover:bg-[#00a88b] transition-all cursor-pointer shadow-md shadow-[#00C2A0]/20 disabled:opacity-50"
@@ -745,6 +785,49 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 <RefreshCw className={`w-3.5 h-3.5 ${isSyncing ? 'animate-spin' : ''}`} />
                 <span>Tarik Data dari Supabase</span>
               </button>
+
+              <button
+                type="button"
+                onClick={async () => {
+                  if (!supabaseUrl || !supabaseKey) {
+                    setSyncStatusMsg({ type: 'error', text: 'Mohon isi URL dan Anon Key terlebih dahulu.' });
+                    return;
+                  }
+                  if (!confirm(`Kirim seluruh data lokal saat ini (${teachers.length} guru, ${students.length} siswa, ${users.length} akun, ${getRecords().length} catatan) ke Supabase?`)) {
+                    return;
+                  }
+                  setIsPushing(true);
+                  setSyncStatusMsg({ type: 'info', text: 'Mengunggah seluruh data lokal ke database Supabase...' });
+                  const records = getRecords();
+                  const res = await pushAllDataToSupabase(teachers, students, users, records);
+                  setIsPushing(false);
+                  setSyncStatusMsg({
+                    type: res.success ? 'success' : 'error',
+                    text: res.message,
+                  });
+                }}
+                disabled={isPushing}
+                className="inline-flex items-center gap-2 px-4 py-2 rounded-xl border border-purple-200 bg-purple-50 hover:bg-purple-100 text-xs font-bold text-purple-700 transition-colors cursor-pointer disabled:opacity-50"
+              >
+                <Upload className={`w-3.5 h-3.5 ${isPushing ? 'animate-bounce' : ''}`} />
+                <span>{isPushing ? 'Mengunggah...' : 'Kirim Seluruh Data Lokal ke Supabase'}</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  startRealtimeSubscription();
+                  setSyncStatusMsg({ type: 'info', text: 'Menghubungkan ulang channel Realtime (postgres_changes)...' });
+                  setTimeout(() => {
+                    setSyncStatusMsg({ type: 'success', text: 'Subscription Realtime postgres_changes aktif!' });
+                  }, 1500);
+                }}
+                className="inline-flex items-center gap-2 px-4 py-2 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 text-xs font-semibold text-slate-600 transition-colors cursor-pointer"
+                title="Restart subscription realtime postgres_changes"
+              >
+                <Zap className="w-3.5 h-3.5 text-amber-500" />
+                <span>Hubungkan Ulang Realtime</span>
+              </button>
             </div>
           </div>
 
@@ -771,7 +854,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                   onClick={() => {
                     const records = getRecords();
                     let sqlText = '';
-                    if (sqlViewMode === 'schema') sqlText = getSupabaseDdlSchema();
+                    if (sqlViewMode === 'subscription') sqlText = getSubscriptionCodeSample();
+                    else if (sqlViewMode === 'schema') sqlText = getSupabaseDdlSchema();
                     else if (sqlViewMode === 'seed') sqlText = getSupabaseSeedDataSql(teachers, students, users, records);
                     else sqlText = getCompleteSupabaseSql(teachers, students, users, records);
 
@@ -782,7 +866,13 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                   className="inline-flex items-center gap-1.5 px-4 py-2.5 rounded-xl bg-[#00C2A0] text-white text-xs font-bold hover:bg-[#00a88b] transition-all cursor-pointer shadow-md shadow-[#00C2A0]/20"
                 >
                   {copiedSql ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
-                  <span>{copiedSql ? 'Tersalin ke Clipboard!' : 'Salin Skrip SQL'}</span>
+                  <span>
+                    {copiedSql
+                      ? 'Tersalin ke Clipboard!'
+                      : sqlViewMode === 'subscription'
+                      ? 'Salin Kode Subscription'
+                      : 'Salin Skrip SQL'}
+                  </span>
                 </button>
 
                 <button
@@ -791,7 +881,10 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                     const records = getRecords();
                     let sqlText = '';
                     let filename = 'salam_quran_supabase_complete.sql';
-                    if (sqlViewMode === 'schema') {
+                    if (sqlViewMode === 'subscription') {
+                      sqlText = getSubscriptionCodeSample();
+                      filename = 'salam_quran_realtime_subscription.ts';
+                    } else if (sqlViewMode === 'schema') {
                       sqlText = getSupabaseDdlSchema();
                       filename = 'salam_quran_schema_realtime.sql';
                     } else if (sqlViewMode === 'seed') {
@@ -812,7 +905,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                   className="inline-flex items-center gap-1.5 px-4 py-2.5 rounded-xl border border-slate-200 bg-slate-50 hover:bg-slate-100 text-xs font-bold text-slate-700 transition-colors cursor-pointer"
                 >
                   <Download className="w-4 h-4" />
-                  <span>Unduh File .sql</span>
+                  <span>
+                    {sqlViewMode === 'subscription' ? 'Unduh File .ts' : 'Unduh File .sql'}
+                  </span>
                 </button>
               </div>
             </div>
@@ -859,6 +954,20 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                   <FileCode2 className="w-3.5 h-3.5" />
                   <span>Hanya Data Guru, Siswa & Akun (Seed Data)</span>
                 </button>
+
+                <button
+                  type="button"
+                  onClick={() => setSqlViewMode('subscription')}
+                  className={`px-3.5 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer ${
+                    sqlViewMode === 'subscription'
+                      ? 'bg-white text-emerald-700 shadow-xs'
+                      : 'text-slate-600 hover:text-slate-900'
+                  }`}
+                >
+                  <Radio className="w-3.5 h-3.5 text-emerald-600 animate-pulse" />
+                  <span>Kode Subscription (postgres_changes)</span>
+                  <span className="px-1.5 py-0.2 rounded-md bg-emerald-100 text-emerald-800 text-[10px]">Realtime Client</span>
+                </button>
               </div>
 
               {/* Data Summary Stats */}
@@ -872,31 +981,44 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
             </div>
 
             {/* Quick Step Guide */}
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-              <div className="p-4 rounded-2xl bg-slate-50 border border-slate-200 text-xs">
-                <div className="w-6 h-6 rounded-lg bg-teal-100 text-[#008f75] font-black text-center leading-6 mb-2">1</div>
-                <p className="font-bold text-slate-800 mb-1">Buka Supabase</p>
-                <p className="text-slate-500 text-[11px] leading-relaxed">
-                  Login ke dashboard Supabase Anda dan pilih project yang digunakan.
-                </p>
-              </div>
+            {sqlViewMode !== 'subscription' ? (
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <div className="p-4 rounded-2xl bg-slate-50 border border-slate-200 text-xs">
+                  <div className="w-6 h-6 rounded-lg bg-teal-100 text-[#008f75] font-black text-center leading-6 mb-2">1</div>
+                  <p className="font-bold text-slate-800 mb-1">Buka Supabase</p>
+                  <p className="text-slate-500 text-[11px] leading-relaxed">
+                    Login ke dashboard Supabase Anda dan pilih project yang digunakan.
+                  </p>
+                </div>
 
-              <div className="p-4 rounded-2xl bg-slate-50 border border-slate-200 text-xs">
-                <div className="w-6 h-6 rounded-lg bg-teal-100 text-[#008f75] font-black text-center leading-6 mb-2">2</div>
-                <p className="font-bold text-slate-800 mb-1">Menu SQL Editor</p>
-                <p className="text-slate-500 text-[11px] leading-relaxed">
-                  Pilih menu <strong>SQL Editor</strong> di bilah navigasi kiri, lalu buat <strong>New Query</strong>.
-                </p>
-              </div>
+                <div className="p-4 rounded-2xl bg-slate-50 border border-slate-200 text-xs">
+                  <div className="w-6 h-6 rounded-lg bg-teal-100 text-[#008f75] font-black text-center leading-6 mb-2">2</div>
+                  <p className="font-bold text-slate-800 mb-1">Menu SQL Editor</p>
+                  <p className="text-slate-500 text-[11px] leading-relaxed">
+                    Pilih menu <strong>SQL Editor</strong> di bilah navigasi kiri, lalu buat <strong>New Query</strong>.
+                  </p>
+                </div>
 
-              <div className="p-4 rounded-2xl bg-slate-50 border border-slate-200 text-xs">
-                <div className="w-6 h-6 rounded-lg bg-teal-100 text-[#008f75] font-black text-center leading-6 mb-2">3</div>
-                <p className="font-bold text-slate-800 mb-1">Tempel & Klik RUN</p>
-                <p className="text-slate-500 text-[11px] leading-relaxed">
-                  Tempelkan skrip di bawah ini lalu tekan tombol <strong>RUN</strong>. Seluruh tabel, publikasi realtime, dan data langsung siap!
+                <div className="p-4 rounded-2xl bg-slate-50 border border-slate-200 text-xs">
+                  <div className="w-6 h-6 rounded-lg bg-teal-100 text-[#008f75] font-black text-center leading-6 mb-2">3</div>
+                  <p className="font-bold text-slate-800 mb-1">Tempel & Klik RUN</p>
+                  <p className="text-slate-500 text-[11px] leading-relaxed">
+                    Tempelkan skrip di bawah ini lalu tekan tombol <strong>RUN</strong>. Seluruh tabel, publikasi realtime, dan data langsung siap!
+                  </p>
+                </div>
+              </div>
+            ) : (
+              <div className="p-4 rounded-2xl bg-emerald-50 border border-emerald-200 text-xs">
+                <div className="flex items-center gap-2 mb-1.5 font-bold text-emerald-800">
+                  <Radio className="w-4 h-4 text-emerald-600 animate-pulse" />
+                  <span>Mekanisme Subscription postgres_changes di SALAM Quran</span>
+                </div>
+                <p className="text-emerald-900/80 leading-relaxed text-[11px]">
+                  Kode di bawah ini aktif berjalan di dalam aplikasi saat terhubung online ke Supabase. Melalui channel <code>salam_quran_postgres_changes</code>, aplikasi mendengarkan secara realtime seluruh mutasi data:
+                  <strong> records</strong> (setoran hafalan guru), <strong>students</strong> (tambah/hapus siswa), <strong>teachers</strong> (data guru), dan <strong>users</strong> (perubahan kata sandi akun). Seluruh perangkat guru dan wali murid akan tersinkronisasi otomatis dalam hitungan milidetik!
                 </p>
               </div>
-            </div>
+            )}
 
             {/* Code Viewer */}
             <div className="relative rounded-2xl overflow-hidden border border-slate-800 shadow-md">
@@ -906,7 +1028,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                   <span className="w-2.5 h-2.5 rounded-full bg-amber-500/80 inline-block" />
                   <span className="w-2.5 h-2.5 rounded-full bg-emerald-500/80 inline-block" />
                   <span className="ml-2 text-slate-300 font-semibold">
-                    {sqlViewMode === 'all'
+                    {sqlViewMode === 'subscription'
+                      ? 'salam_quran_realtime_subscription.ts'
+                      : sqlViewMode === 'all'
                       ? 'salam_quran_complete_schema_and_data.sql'
                       : sqlViewMode === 'schema'
                       ? 'salam_quran_schema_realtime.sql'
@@ -914,7 +1038,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                   </span>
                 </div>
                 <span className="text-[11px] text-teal-400 font-sans font-medium">
-                  {sqlViewMode === 'all'
+                  {sqlViewMode === 'subscription'
+                    ? 'TypeScript Supabase JS v2 • postgres_changes'
+                    : sqlViewMode === 'all'
                     ? 'DDL + Realtime CDC + Data Master Lengkap'
                     : sqlViewMode === 'schema'
                     ? 'PostgreSQL DDL + CDC Publication'
@@ -925,6 +1051,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               <pre className="bg-slate-900 text-emerald-400 p-5 text-xs font-mono overflow-x-auto max-h-[520px] leading-relaxed select-all">
                 {(() => {
                   const records = getRecords();
+                  if (sqlViewMode === 'subscription') return getSubscriptionCodeSample();
                   if (sqlViewMode === 'schema') return getSupabaseDdlSchema();
                   if (sqlViewMode === 'seed') return getSupabaseSeedDataSql(teachers, students, users, records);
                   return getCompleteSupabaseSql(teachers, students, users, records);

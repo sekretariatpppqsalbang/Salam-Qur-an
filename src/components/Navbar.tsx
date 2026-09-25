@@ -1,7 +1,8 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { UserAccount } from '../types';
-import { BookOpen, LogOut, Key, Database, ShieldCheck, UserCheck, Sparkles, AlertCircle } from 'lucide-react';
+import { BookOpen, LogOut, Key, Database, ShieldCheck, UserCheck, Sparkles, AlertCircle, Radio } from 'lucide-react';
 import { PWAInstallButton } from './PWAInstallButton';
+import { getRealtimeStatus, getSupabaseConfig, RealtimeConnectionStatus } from '../services/supabaseService';
 
 interface NavbarProps {
   currentUser: UserAccount;
@@ -15,6 +16,27 @@ export const Navbar: React.FC<NavbarProps> = ({
   onChangePasswordClick,
 }) => {
   const [menuOpen, setMenuOpen] = useState(false);
+  const [realtimeStatus, setRealtimeStatus] = useState<RealtimeConnectionStatus>(() => getRealtimeStatus());
+  const [hasSupabase, setHasSupabase] = useState(() => getSupabaseConfig().isConnected);
+
+  useEffect(() => {
+    const handleStatus = (e: any) => {
+      if (e.detail?.status) {
+        setRealtimeStatus(e.detail.status);
+      }
+    };
+    const handleConfig = () => {
+      setHasSupabase(getSupabaseConfig().isConnected);
+      setRealtimeStatus(getRealtimeStatus());
+    };
+
+    window.addEventListener('salam_realtime_status_changed', handleStatus);
+    window.addEventListener('salam_supabase_config_changed', handleConfig);
+    return () => {
+      window.removeEventListener('salam_realtime_status_changed', handleStatus);
+      window.removeEventListener('salam_supabase_config_changed', handleConfig);
+    };
+  }, []);
 
   const getRoleBadge = () => {
     switch (currentUser.role) {
@@ -67,6 +89,43 @@ export const Navbar: React.FC<NavbarProps> = ({
           {/* Right Actions & User Profile */}
           <div className="flex items-center gap-2 sm:gap-3">
             
+            {/* Realtime Online Status Pill */}
+            {hasSupabase && (
+              <div
+                className={`hidden md:inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-semibold border transition-all ${
+                  realtimeStatus === 'CONNECTED'
+                    ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                    : realtimeStatus === 'CONNECTING'
+                    ? 'bg-amber-50 text-amber-700 border-amber-200'
+                    : 'bg-slate-50 text-slate-600 border-slate-200'
+                }`}
+                title={
+                  realtimeStatus === 'CONNECTED'
+                    ? 'Terhubung ke Supabase Realtime (postgres_changes aktif)'
+                    : realtimeStatus === 'CONNECTING'
+                    ? 'Menghubungkan ke channel realtime Supabase...'
+                    : 'Mode Offline (Cache lokal aktif)'
+                }
+              >
+                <span
+                  className={`w-1.5 h-1.5 rounded-full ${
+                    realtimeStatus === 'CONNECTED'
+                      ? 'bg-emerald-500 animate-pulse'
+                      : realtimeStatus === 'CONNECTING'
+                      ? 'bg-amber-500 animate-ping'
+                      : 'bg-slate-400'
+                  }`}
+                />
+                <span>
+                  {realtimeStatus === 'CONNECTED'
+                    ? 'Online • Realtime'
+                    : realtimeStatus === 'CONNECTING'
+                    ? 'Menghubungkan...'
+                    : 'Offline'}
+                </span>
+              </div>
+            )}
+
             {/* PWA In-App Install Button */}
             <PWAInstallButton />
 
