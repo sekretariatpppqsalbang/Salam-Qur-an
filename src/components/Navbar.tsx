@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { UserAccount } from '../types';
 import { BookOpen, LogOut, Key, Database, ShieldCheck, UserCheck, Sparkles, AlertCircle } from 'lucide-react';
-import { getSupabaseConfig } from '../services/supabaseService';
+import { PWAInstallButton } from './PWAInstallButton';
 
 interface NavbarProps {
   currentUser: UserAccount;
@@ -65,8 +65,11 @@ export const Navbar: React.FC<NavbarProps> = ({
           </div>
 
           {/* Right Actions & User Profile */}
-          <div className="flex items-center gap-2 sm:gap-4">
+          <div className="flex items-center gap-2 sm:gap-3">
             
+            {/* PWA In-App Install Button */}
+            <PWAInstallButton />
+
             {/* Default Password Warning */}
             {currentUser.isDefaultPassword && (
               <button

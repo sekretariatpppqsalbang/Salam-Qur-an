@@ -16,6 +16,7 @@ import { GuruDashboard } from './components/GuruDashboard';
 import { WaliDashboard } from './components/WaliDashboard';
 import { AdminDashboard } from './components/AdminDashboard';
 import { ChangePasswordModal } from './components/ChangePasswordModal';
+import { OfflineIndicator } from './components/OfflineIndicator';
 import { DEFAULT_PASSWORD } from './services/storageService';
 
 export default function App() {
@@ -67,7 +68,12 @@ export default function App() {
   }
 
   if (!currentUser) {
-    return <LoginPage onLoginSuccess={handleLoginSuccess} />;
+    return (
+      <>
+        <LoginPage onLoginSuccess={handleLoginSuccess} />
+        <OfflineIndicator />
+      </>
+    );
   }
 
   return (
@@ -105,7 +111,8 @@ export default function App() {
         </div>
       </footer>
 
-      {/* Modals */}
+      {/* Modals & Offline Notification */}
+      <OfflineIndicator />
       <ChangePasswordModal
         currentUser={currentUser}
         isOpen={isChangePasswordOpen}

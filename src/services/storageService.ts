@@ -1,5 +1,6 @@
 import { Teacher, Student, HafalanRecord, UserAccount, Role } from '../types';
 import { INITIAL_TEACHERS, INITIAL_STUDENTS, INITIAL_RECORDS } from '../data/initialData';
+import { pushRecordToSupabase, getSupabaseClient } from './supabaseService';
 import * as XLSX from 'xlsx';
 
 const KEY_TEACHERS = 'salam_quran_teachers_v1';
@@ -225,6 +226,12 @@ export function addRecord(record: Omit<HafalanRecord, 'id' | 'createdAt'>): Hafa
 
   records.unshift(newRecord); // newest first
   saveRecords(records);
+
+  // Sync to Supabase in background if online/configured
+  pushRecordToSupabase(newRecord).catch((err) => {
+    console.debug('Offline or Supabase sync delayed:', err);
+  });
+
   return newRecord;
 }
 
@@ -235,12 +242,50 @@ export function updateRecord(id: string, updatedFields: Partial<HafalanRecord>):
 
   records[index] = { ...records[index], ...updatedFields };
   saveRecords(records);
+
+  // Sync updated record to Supabase
+  pushRecordToSupabase(records[index]).catch((err) => {
+    console.debug('Offline or Supabase sync delayed:', err);
+  });
+
   return records[index];
 }
 
 export function deleteRecord(id: string): void {
   const records = getRecords().filter(r => r.id !== id);
   saveRecords(records);
+
+  // Delete from Supabase if online
+  const supabase = getSupabaseClient();
+  if (supabase) {
+    supabase.from('records').delete().eq('id', id).then(
+      () => {},
+      (err) => console.debug('Delete sync skipped or offline:', err)
+    );
+  }
+}
+
+/**
+ * Apply dataset pulled from Supabase to local storage cache
+ */
+export function applySupabaseSyncData(data: {
+  teachers?: Teacher[];
+  students?: Student[];
+  records?: HafalanRecord[];
+  users?: UserAccount[];
+}): void {
+  if (data.teachers && data.teachers.length > 0) {
+    saveTeachers(data.teachers);
+  }
+  if (data.students && data.students.length > 0) {
+    saveStudents(data.students);
+  }
+  if (data.records && data.records.length > 0) {
+    saveRecords(data.records);
+  }
+  if (data.users && data.users.length > 0) {
+    saveUserAccounts(data.users);
+  }
 }
 
 // ----------------------------------------------------

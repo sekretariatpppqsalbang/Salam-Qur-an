@@ -13,8 +13,18 @@ import {
   resetAllPasswordsToDefault,
   importStudentsFromFile,
   DEFAULT_PASSWORD,
+  getRecords,
+  applySupabaseSyncData,
 } from '../services/storageService';
-import { getSupabaseSqlSchema } from '../services/supabaseService';
+import {
+  getSupabaseConfig,
+  saveSupabaseConfig,
+  testSupabaseConnection,
+  getCompleteSupabaseSql,
+  getSupabaseDdlSchema,
+  getSupabaseSeedDataSql,
+  fetchAllFromSupabase,
+} from '../services/supabaseService';
 import * as XLSX from 'xlsx';
 import {
   Users,
@@ -34,6 +44,11 @@ import {
   Check,
   Database,
   Sparkles,
+  RefreshCw,
+  Globe,
+  Radio,
+  FileCode2,
+  Layers,
 } from 'lucide-react';
 
 interface AdminDashboardProps {
@@ -48,6 +63,14 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const [teachers, setTeachers] = useState<Teacher[]>(() => getTeachers());
   const [users, setUsers] = useState<UserAccount[]>(() => getUserAccounts());
   const [copiedSql, setCopiedSql] = useState(false);
+
+  // SQL & Supabase Management States
+  const [sqlViewMode, setSqlViewMode] = useState<'all' | 'schema' | 'seed'>('all');
+  const [supabaseUrl, setSupabaseUrl] = useState(() => getSupabaseConfig().url);
+  const [supabaseKey, setSupabaseKey] = useState(() => getSupabaseConfig().anonKey);
+  const [isTestingConnection, setIsTestingConnection] = useState(false);
+  const [isSyncing, setIsSyncing] = useState(false);
+  const [syncStatusMsg, setSyncStatusMsg] = useState<{ type: 'success' | 'error' | 'info'; text: string } | null>(null);
 
   // Siswa Management States
   const [studentClassFilter, setStudentClassFilter] = useState('1A');
@@ -588,98 +611,326 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         </div>
       )}
 
-      {/* TAB 5: SKRIP SQL REALTIME SUPABASE */}
+      {/* TAB 5: SKRIP SQL REALTIME & KONEKSI SUPABASE */}
       {activeTab === 'sql-code' && (
-        <div className="bg-white rounded-3xl p-6 sm:p-8 shadow-sm border border-slate-200/80 space-y-6">
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-6 border-b border-slate-100">
-            <div>
-              <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-teal-50 text-[#008f75] text-xs font-bold mb-2">
-                <Database className="w-3.5 h-3.5 text-[#00C2A0]" />
-                <span>PostgreSQL + Supabase Realtime CDC</span>
+        <div className="space-y-6">
+          
+          {/* Card 1: Pengaturan Koneksi Supabase & Sinkronisasi Online PWA */}
+          <div className="bg-white rounded-3xl p-6 sm:p-8 shadow-sm border border-slate-200/80 space-y-5">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-4 border-b border-slate-100">
+              <div>
+                <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-teal-50 text-[#008f75] text-xs font-bold mb-1.5">
+                  <Radio className="w-3.5 h-3.5 text-[#00C2A0] animate-pulse" />
+                  <span>Koneksi Database Online Supabase</span>
+                </div>
+                <h3 className="text-base sm:text-lg font-bold text-[#3F4E5A]">
+                  Hubungkan Aplikasi ke Supabase (PWA Online)
+                </h3>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  Data otomatis tersinkronisasi dua arah secara realtime. Jika offline, PWA akan menggunakan cache lokal di perangkat Anda.
+                </p>
               </div>
-              <h3 className="text-base sm:text-lg font-bold text-[#3F4E5A]">
-                Skrip SQL Schema & Realtime Supabase
-              </h3>
-              <p className="text-xs text-slate-500 mt-1 max-w-2xl">
-                Gunakan skrip DDL ini di Supabase SQL Editor untuk membuat tabel dan mengaktifkan sinkronisasi data seketika (<code className="font-mono text-[#008f75]">supabase_realtime</code>).
-              </p>
-            </div>
 
-            <div className="flex flex-wrap items-center gap-2">
-              <button
-                type="button"
-                onClick={() => {
-                  navigator.clipboard.writeText(getSupabaseSqlSchema());
-                  setCopiedSql(true);
-                  setTimeout(() => setCopiedSql(false), 2500);
-                }}
-                className="inline-flex items-center gap-1.5 px-4 py-2.5 rounded-xl bg-[#00C2A0] text-white text-xs font-bold hover:bg-[#00a88b] transition-all cursor-pointer shadow-md shadow-[#00C2A0]/20"
-              >
-                {copiedSql ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
-                <span>{copiedSql ? 'Tersalin ke Clipboard!' : 'Salin Seluruh SQL'}</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => {
-                  const blob = new Blob([getSupabaseSqlSchema()], { type: 'text/plain;charset=utf-8' });
-                  const url = URL.createObjectURL(blob);
-                  const a = document.createElement('a');
-                  a.href = url;
-                  a.download = 'salam_quran_supabase_realtime.sql';
-                  a.click();
-                  URL.revokeObjectURL(url);
-                }}
-                className="inline-flex items-center gap-1.5 px-4 py-2.5 rounded-xl border border-slate-200 bg-slate-50 hover:bg-slate-100 text-xs font-bold text-slate-700 transition-colors cursor-pointer"
-              >
-                <Download className="w-4 h-4" />
-                <span>Unduh File .sql</span>
-              </button>
-            </div>
-          </div>
-
-          {/* Quick Step Guide */}
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-            <div className="p-4 rounded-2xl bg-slate-50 border border-slate-200 text-xs">
-              <div className="w-6 h-6 rounded-lg bg-teal-100 text-[#008f75] font-black text-center leading-6 mb-2">1</div>
-              <p className="font-bold text-slate-800 mb-1">Buka Supabase</p>
-              <p className="text-slate-500 text-[11px] leading-relaxed">
-                Login ke dashboard Supabase Anda dan pilih project yang digunakan.
-              </p>
-            </div>
-
-            <div className="p-4 rounded-2xl bg-slate-50 border border-slate-200 text-xs">
-              <div className="w-6 h-6 rounded-lg bg-teal-100 text-[#008f75] font-black text-center leading-6 mb-2">2</div>
-              <p className="font-bold text-slate-800 mb-1">Menu SQL Editor</p>
-              <p className="text-slate-500 text-[11px] leading-relaxed">
-                Pilih menu <strong>SQL Editor</strong> di bilah navigasi kiri, lalu buat <strong>New Query</strong>.
-              </p>
-            </div>
-
-            <div className="p-4 rounded-2xl bg-slate-50 border border-slate-200 text-xs">
-              <div className="w-6 h-6 rounded-lg bg-teal-100 text-[#008f75] font-black text-center leading-6 mb-2">3</div>
-              <p className="font-bold text-slate-800 mb-1">Tempel & Klik RUN</p>
-              <p className="text-slate-500 text-[11px] leading-relaxed">
-                Tempelkan skrip di bawah ini lalu tekan tombol <strong>RUN</strong>. Tabel otomatis aktif secara realtime!
-              </p>
-            </div>
-          </div>
-
-          {/* Code Viewer */}
-          <div className="relative rounded-2xl overflow-hidden border border-slate-800 shadow-md">
-            <div className="bg-slate-950 px-4 py-2.5 border-b border-slate-800 flex items-center justify-between text-xs text-slate-400 font-mono">
+              {/* Status Indicator */}
               <div className="flex items-center gap-2">
-                <span className="w-2.5 h-2.5 rounded-full bg-rose-500/80 inline-block" />
-                <span className="w-2.5 h-2.5 rounded-full bg-amber-500/80 inline-block" />
-                <span className="w-2.5 h-2.5 rounded-full bg-emerald-500/80 inline-block" />
-                <span className="ml-2 text-slate-300 font-semibold">schema_realtime.sql</span>
+                <span className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold border ${
+                  supabaseUrl && supabaseKey
+                    ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                    : 'bg-amber-50 text-amber-700 border-amber-200'
+                }`}>
+                  <span className={`w-2 h-2 rounded-full ${supabaseUrl && supabaseKey ? 'bg-emerald-500 animate-pulse' : 'bg-amber-500'}`} />
+                  {supabaseUrl && supabaseKey ? 'Supabase Terkonfigurasi' : 'Mode Offline / Lokal'}
+                </span>
               </div>
-              <span className="text-[11px] text-teal-400 font-sans font-medium">PostgreSQL DDL + CDC</span>
             </div>
 
-            <pre className="bg-slate-900 text-emerald-400 p-5 text-xs font-mono overflow-x-auto max-h-[480px] leading-relaxed select-all">
-              {getSupabaseSqlSchema()}
-            </pre>
+            {/* Inputs Form */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div>
+                <label className="block text-xs font-bold text-[#3F4E5A] mb-1.5">
+                  Supabase Project URL
+                </label>
+                <input
+                  type="url"
+                  placeholder="https://xyzcompany.supabase.co"
+                  value={supabaseUrl}
+                  onChange={(e) => setSupabaseUrl(e.target.value)}
+                  className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 text-xs font-mono bg-slate-50/50 focus:bg-white focus:border-[#00C2A0] outline-none transition-all"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-[#3F4E5A] mb-1.5">
+                  Supabase Anon Public Key
+                </label>
+                <input
+                  type="password"
+                  placeholder="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+                  value={supabaseKey}
+                  onChange={(e) => setSupabaseKey(e.target.value)}
+                  className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 text-xs font-mono bg-slate-50/50 focus:bg-white focus:border-[#00C2A0] outline-none transition-all"
+                />
+              </div>
+            </div>
+
+            {/* Sync Feedback Message */}
+            {syncStatusMsg && (
+              <div className={`p-3.5 rounded-xl text-xs font-medium flex items-center gap-2.5 ${
+                syncStatusMsg.type === 'success'
+                  ? 'bg-emerald-50 border border-emerald-200 text-emerald-800'
+                  : syncStatusMsg.type === 'error'
+                  ? 'bg-rose-50 border border-rose-200 text-rose-800'
+                  : 'bg-teal-50 border border-teal-200 text-teal-800'
+              }`}>
+                {syncStatusMsg.type === 'success' ? (
+                  <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                ) : syncStatusMsg.type === 'error' ? (
+                  <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
+                ) : (
+                  <RefreshCw className="w-4 h-4 text-teal-600 animate-spin shrink-0" />
+                )}
+                <span>{syncStatusMsg.text}</span>
+              </div>
+            )}
+
+            {/* Connection Actions */}
+            <div className="flex flex-wrap items-center gap-2.5 pt-1">
+              <button
+                type="button"
+                onClick={async () => {
+                  saveSupabaseConfig({ url: supabaseUrl, anonKey: supabaseKey });
+                  setIsTestingConnection(true);
+                  setSyncStatusMsg({ type: 'info', text: 'Menguji koneksi ke Supabase...' });
+                  const res = await testSupabaseConnection(supabaseUrl, supabaseKey);
+                  setIsTestingConnection(false);
+                  setSyncStatusMsg({
+                    type: res.success ? 'success' : 'error',
+                    text: res.message
+                  });
+                }}
+                disabled={isTestingConnection}
+                className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-[#00C2A0] text-white text-xs font-bold hover:bg-[#00a88b] transition-all cursor-pointer shadow-md shadow-[#00C2A0]/20 disabled:opacity-50"
+              >
+                <CheckCircle2 className="w-4 h-4" />
+                <span>{isTestingConnection ? 'Menguji...' : 'Simpan & Uji Koneksi'}</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={async () => {
+                  if (!supabaseUrl || !supabaseKey) {
+                    setSyncStatusMsg({ type: 'error', text: 'Mohon isi URL dan Anon Key terlebih dahulu.' });
+                    return;
+                  }
+                  setIsSyncing(true);
+                  setSyncStatusMsg({ type: 'info', text: 'Mengambil data terbaru dari database Supabase...' });
+                  const res = await fetchAllFromSupabase();
+                  setIsSyncing(false);
+                  if (res.error) {
+                    setSyncStatusMsg({ type: 'error', text: res.error });
+                  } else {
+                    applySupabaseSyncData(res);
+                    if (res.students) setStudents(res.students);
+                    if (res.teachers) setTeachers(res.teachers);
+                    if (res.users) setUsers(res.users);
+                    setSyncStatusMsg({
+                      type: 'success',
+                      text: `Berhasil sinkronisasi! Memuat ${res.teachers?.length || 0} guru, ${res.students?.length || 0} siswa, dan ${res.records?.length || 0} catatan dari Supabase.`
+                    });
+                  }
+                }}
+                disabled={isSyncing}
+                className="inline-flex items-center gap-2 px-4 py-2 rounded-xl border border-slate-200 bg-slate-50 hover:bg-slate-100 text-xs font-bold text-slate-700 transition-colors cursor-pointer disabled:opacity-50"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${isSyncing ? 'animate-spin' : ''}`} />
+                <span>Tarik Data dari Supabase</span>
+              </button>
+            </div>
+          </div>
+
+          {/* Card 2: Skrip SQL Schema & Realtime dengan Seluruh Data Siswa & Guru */}
+          <div className="bg-white rounded-3xl p-6 sm:p-8 shadow-sm border border-slate-200/80 space-y-6">
+            <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 pb-6 border-b border-slate-100">
+              <div>
+                <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-purple-50 text-purple-700 text-xs font-bold mb-2">
+                  <Database className="w-3.5 h-3.5 text-purple-600" />
+                  <span>Skrip SQL Otomatis Siap Pakai</span>
+                </div>
+                <h3 className="text-base sm:text-lg font-bold text-[#3F4E5A]">
+                  Skrip SQL Schema & Realtime Sesuai Seluruh Data Demo
+                </h3>
+                <p className="text-xs text-slate-500 mt-1 max-w-2xl">
+                  Skrip ini telah memuat seluruh <strong>18 Guru Qur'an</strong>, seluruh siswa <strong>19 Kelas ({students.length} Siswa)</strong>, akun pengguna (default password <code className="font-mono text-[#008f75]">salsabila3</code>), serta publikasi Realtime CDC.
+                </p>
+              </div>
+
+              {/* Action Buttons */}
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    const records = getRecords();
+                    let sqlText = '';
+                    if (sqlViewMode === 'schema') sqlText = getSupabaseDdlSchema();
+                    else if (sqlViewMode === 'seed') sqlText = getSupabaseSeedDataSql(teachers, students, users, records);
+                    else sqlText = getCompleteSupabaseSql(teachers, students, users, records);
+
+                    navigator.clipboard.writeText(sqlText);
+                    setCopiedSql(true);
+                    setTimeout(() => setCopiedSql(false), 2500);
+                  }}
+                  className="inline-flex items-center gap-1.5 px-4 py-2.5 rounded-xl bg-[#00C2A0] text-white text-xs font-bold hover:bg-[#00a88b] transition-all cursor-pointer shadow-md shadow-[#00C2A0]/20"
+                >
+                  {copiedSql ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
+                  <span>{copiedSql ? 'Tersalin ke Clipboard!' : 'Salin Skrip SQL'}</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    const records = getRecords();
+                    let sqlText = '';
+                    let filename = 'salam_quran_supabase_complete.sql';
+                    if (sqlViewMode === 'schema') {
+                      sqlText = getSupabaseDdlSchema();
+                      filename = 'salam_quran_schema_realtime.sql';
+                    } else if (sqlViewMode === 'seed') {
+                      sqlText = getSupabaseSeedDataSql(teachers, students, users, records);
+                      filename = 'salam_quran_data_seed.sql';
+                    } else {
+                      sqlText = getCompleteSupabaseSql(teachers, students, users, records);
+                    }
+
+                    const blob = new Blob([sqlText], { type: 'text/plain;charset=utf-8' });
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = filename;
+                    a.click();
+                    URL.revokeObjectURL(url);
+                  }}
+                  className="inline-flex items-center gap-1.5 px-4 py-2.5 rounded-xl border border-slate-200 bg-slate-50 hover:bg-slate-100 text-xs font-bold text-slate-700 transition-colors cursor-pointer"
+                >
+                  <Download className="w-4 h-4" />
+                  <span>Unduh File .sql</span>
+                </button>
+              </div>
+            </div>
+
+            {/* Selector Mode Tabs */}
+            <div className="flex flex-wrap items-center justify-between gap-3 p-2 bg-slate-100/80 rounded-2xl">
+              <div className="flex flex-wrap gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => setSqlViewMode('all')}
+                  className={`px-3.5 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer ${
+                    sqlViewMode === 'all'
+                      ? 'bg-white text-purple-700 shadow-xs'
+                      : 'text-slate-600 hover:text-slate-900'
+                  }`}
+                >
+                  <Layers className="w-3.5 h-3.5" />
+                  <span>Skrip Lengkap (Schema + Realtime + Seluruh Data)</span>
+                  <span className="px-1.5 py-0.2 rounded-md bg-purple-100 text-purple-800 text-[10px]">Rekomendasi</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setSqlViewMode('schema')}
+                  className={`px-3.5 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer ${
+                    sqlViewMode === 'schema'
+                      ? 'bg-white text-purple-700 shadow-xs'
+                      : 'text-slate-600 hover:text-slate-900'
+                  }`}
+                >
+                  <Code2 className="w-3.5 h-3.5" />
+                  <span>Hanya Schema DDL & Realtime</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setSqlViewMode('seed')}
+                  className={`px-3.5 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer ${
+                    sqlViewMode === 'seed'
+                      ? 'bg-white text-purple-700 shadow-xs'
+                      : 'text-slate-600 hover:text-slate-900'
+                  }`}
+                >
+                  <FileCode2 className="w-3.5 h-3.5" />
+                  <span>Hanya Data Guru, Siswa & Akun (Seed Data)</span>
+                </button>
+              </div>
+
+              {/* Data Summary Stats */}
+              <div className="flex items-center gap-2 text-[11px] text-slate-500 font-semibold px-2">
+                <span>{teachers.length} Guru</span>
+                <span>&bull;</span>
+                <span>{students.length} Siswa (19 Kelas)</span>
+                <span>&bull;</span>
+                <span>{users.length} Akun</span>
+              </div>
+            </div>
+
+            {/* Quick Step Guide */}
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <div className="p-4 rounded-2xl bg-slate-50 border border-slate-200 text-xs">
+                <div className="w-6 h-6 rounded-lg bg-teal-100 text-[#008f75] font-black text-center leading-6 mb-2">1</div>
+                <p className="font-bold text-slate-800 mb-1">Buka Supabase</p>
+                <p className="text-slate-500 text-[11px] leading-relaxed">
+                  Login ke dashboard Supabase Anda dan pilih project yang digunakan.
+                </p>
+              </div>
+
+              <div className="p-4 rounded-2xl bg-slate-50 border border-slate-200 text-xs">
+                <div className="w-6 h-6 rounded-lg bg-teal-100 text-[#008f75] font-black text-center leading-6 mb-2">2</div>
+                <p className="font-bold text-slate-800 mb-1">Menu SQL Editor</p>
+                <p className="text-slate-500 text-[11px] leading-relaxed">
+                  Pilih menu <strong>SQL Editor</strong> di bilah navigasi kiri, lalu buat <strong>New Query</strong>.
+                </p>
+              </div>
+
+              <div className="p-4 rounded-2xl bg-slate-50 border border-slate-200 text-xs">
+                <div className="w-6 h-6 rounded-lg bg-teal-100 text-[#008f75] font-black text-center leading-6 mb-2">3</div>
+                <p className="font-bold text-slate-800 mb-1">Tempel & Klik RUN</p>
+                <p className="text-slate-500 text-[11px] leading-relaxed">
+                  Tempelkan skrip di bawah ini lalu tekan tombol <strong>RUN</strong>. Seluruh tabel, publikasi realtime, dan data langsung siap!
+                </p>
+              </div>
+            </div>
+
+            {/* Code Viewer */}
+            <div className="relative rounded-2xl overflow-hidden border border-slate-800 shadow-md">
+              <div className="bg-slate-950 px-4 py-2.5 border-b border-slate-800 flex items-center justify-between text-xs text-slate-400 font-mono">
+                <div className="flex items-center gap-2">
+                  <span className="w-2.5 h-2.5 rounded-full bg-rose-500/80 inline-block" />
+                  <span className="w-2.5 h-2.5 rounded-full bg-amber-500/80 inline-block" />
+                  <span className="w-2.5 h-2.5 rounded-full bg-emerald-500/80 inline-block" />
+                  <span className="ml-2 text-slate-300 font-semibold">
+                    {sqlViewMode === 'all'
+                      ? 'salam_quran_complete_schema_and_data.sql'
+                      : sqlViewMode === 'schema'
+                      ? 'salam_quran_schema_realtime.sql'
+                      : 'salam_quran_seed_data.sql'}
+                  </span>
+                </div>
+                <span className="text-[11px] text-teal-400 font-sans font-medium">
+                  {sqlViewMode === 'all'
+                    ? 'DDL + Realtime CDC + Data Master Lengkap'
+                    : sqlViewMode === 'schema'
+                    ? 'PostgreSQL DDL + CDC Publication'
+                    : 'Data Seed Siswa & Guru'}
+                </span>
+              </div>
+
+              <pre className="bg-slate-900 text-emerald-400 p-5 text-xs font-mono overflow-x-auto max-h-[520px] leading-relaxed select-all">
+                {(() => {
+                  const records = getRecords();
+                  if (sqlViewMode === 'schema') return getSupabaseDdlSchema();
+                  if (sqlViewMode === 'seed') return getSupabaseSeedDataSql(teachers, students, users, records);
+                  return getCompleteSupabaseSql(teachers, students, users, records);
+                })()}
+              </pre>
+            </div>
           </div>
         </div>
       )}

@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { UserAccount, Teacher, Student } from '../types';
 import { authenticate, getTeachers, getStudents, DEFAULT_PASSWORD } from '../services/storageService';
 import { BookOpen, UserCheck, ShieldCheck, Lock, User, ArrowRight, Sparkles, Check, ChevronDown, Search } from 'lucide-react';
+import { PWAInstallButton } from './PWAInstallButton';
 
 interface LoginPageProps {
   onLoginSuccess: (user: UserAccount) => void;
@@ -75,6 +76,11 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onLoginSuccess }) => {
             </h1>
             <p className="text-[11px] font-semibold text-[#008f75]">SD Islam Terpadu Salsabila 3 Banguntapan</p>
           </div>
+        </div>
+
+        {/* PWA Install Button */}
+        <div>
+          <PWAInstallButton />
         </div>
       </div>
 
